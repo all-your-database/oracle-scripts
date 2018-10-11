@@ -12,6 +12,9 @@
 #
 # History :
 #
+# 20181011 - Jon Fife   - Add ASM to DB list
+# 20181011 - Jon Fife   - Option to create DB/SID/service aliases to set environment
+# 20181010 - Jon Fife   - Integrate service and DB output
 # 20181010 - Fred Denis - Added the services
 #                         Added default values and options to show and hide some resources (./rac-status.sh -h for more information)
 # 20181009 - Fred Denis - Show the usual blue "-" when a target is offline on purpose instead of a red "Offline" which was confusing
@@ -61,6 +64,9 @@ cat << END
                 - SHOW_DB       # To show the databases instances
                 - SHOW_LSNR     # To show the listeners
                 - SHOW_SVC      # To show the services
+		- SHOW_ASM	# To show ASM in the DB output
+		- INT_DB_SVC	# To show services in the DB output
+		- SET_ALIAS	# To create aliases for setting up DB environment variables
                 These variables can be modified in the script itself or you can use command line option to revert their value (see below)
 
 END
@@ -72,6 +78,8 @@ cat << END
         -d        Revert the behavior defined by SHOW_DB  ; if SHOW_DB   is set to YES to show the databases by default, then the -d option will hide the databases
         -l        Revert the behavior defined by SHOW_LSNR; if SHOW_LSNR is set to YES to show the listeners by default, then the -l option will hide the listeners
         -s        Revert the behavior defined by SHOW_SVC ; if SHOW_SVC  is set to YES to show the services  by default, then the -s option will hide the services
+	-e	  Create aliases for DB, Instance, and Services to set DB environments
+	-i        Integrate the DB and service output
         -h        Shows this help
 
         Note : the options are cumulative and can be combined with a "the last one wins" behavior :
@@ -90,17 +98,23 @@ exit 123
  #SHOW_DB="NO"
 SHOW_LSNR="YES"                 # Listeners
 #SHOW_LSNR="NO"
- SHOW_SVC="YES"                 # Services
+# SHOW_SVC="YES"                 # Services
  SHOW_SVC="NO"
+ SET_ALIAS="NO"
+ SHOW_ASM="NO"
+ INT_DB_SVC="NO"
 
 # Options
-while getopts "andslh" OPT; do
+while getopts "andslhiem" OPT; do
         case ${OPT} in
         a)         SHOW_DB="YES"        ; SHOW_LSNR="YES"       ; SHOW_SVC="YES"                ;;
         n)         SHOW_DB="NO"         ; SHOW_LSNR="NO"        ; SHOW_SVC="NO"                 ;;
         d)         if [ "$SHOW_DB"   = "YES" ]; then   SHOW_DB="NO"; else   SHOW_DB="YES"; fi   ;;
         s)         if [ "$SHOW_SVC"  = "YES" ]; then  SHOW_SVC="NO"; else  SHOW_SVC="YES"; fi   ;;
         l)         if [ "$SHOW_LSNR" = "YES" ]; then SHOW_LSNR="NO"; else SHOW_LSNR="YES"; fi   ;;
+        i)         INT_DB_SVC="YES"                                                             ;;
+	e)	   SET_ALIAS="YES"								;;
+        m)         if [ "$SHOW_ASM" = "YES" ]; then SHOW_ASM="NO"; else SHOW_ASM="YES"; fi   ;;
         h)         usage                                                                        ;;
         \?)        echo "Invalid option: -$OPTARG" >&2; usage                                   ;;
         esac
@@ -136,8 +150,20 @@ fi
 cat /dev/null                                                   >  $TMP
 if [ "$SHOW_DB" = "YES" ]
 then
+	if [ "$SHOW_ASM" = "YES" ]; then
+		echo NAME=asm					>> $TMP
+		echo " "					>> $TMP
+		echo ACL=foo					>> $TMP
+		echo ORACLE_HOME=$ORACLE_HOME			>> $TMP
+		echo DATABASE_TYPE=ASM				>> $TMP
+		echo ROLE=PRIMARY				>> $TMP
+		crsctl stat res -p -w "TYPE = ora.asm.type"	>> $TMP
+		
+		crsctl stat res -v -w "TYPE = ora.asm.type"	>> $TMP
+	fi
         crsctl stat res -p -w "TYPE = ora.database.type"        >> $TMP
         crsctl stat res -v -w "TYPE = ora.database.type"        >> $TMP
+        crsctl stat res -v -w "TYPE = ora.service.type"         >> $TMP
 fi
 if [ "$SHOW_LSNR" = "YES" ]
 then
@@ -146,13 +172,13 @@ then
         crsctl stat res -v -w "TYPE = ora.scan_listener.type"   >> $TMP
         crsctl stat res -p -w "TYPE = ora.scan_listener.type"   >> $TMP
 fi
-if [ "$SHOW_SVC" = "YES" ]
+if [[ "$SHOW_SVC" = "YES" && "$SHOW_DB" = "NO" ]]
 then
         crsctl stat res -v -w "TYPE = ora.service.type"         >> $TMP
         #crsctl stat res -p -w "TYPE = ora.service.type"        >> $TMP         # not used, in case we need it one day
 fi
 
-        awk  -v NODES="$NODES" 'BEGIN\
+        gawk  -v NODES="$NODES" -v SHOW_SVC="$SHOW_SVC" -v INT_DB_SVC="$INT_DB_SVC" -v HOST=$(hostname) 'BEGIN\
         {             FS = "="                          ;
                       split(NODES, nodes, ",")          ;       # Make a table with the nodes of the cluster
                 # some colors
@@ -169,9 +195,10 @@ fi
 
                 # Default columns size
                 COL_NODE = 18                           ;
-                  COL_DB = 12                           ;
+                  COL_DB = 10                           ;
                  COL_VER = 15                           ;
                 COL_TYPE = 14                           ;
+		COL_SVC = 15				;
         }
 
         #
@@ -189,7 +216,12 @@ fi
         function print_a_line(size)
         {
                 if ( ! size)
-                {       size = COL_DB+COL_VER+(COL_NODE*n)+COL_TYPE+n+3                                         ;
+                {       
+			if (length(INT_DB_SVC) > 2)
+			{	size = COL_DB+COL_SVC+COL_VER+(COL_NODE*n)+COL_TYPE+n+4                         ;
+			} else {
+				size = COL_DB+COL_VER+(COL_NODE*n)+COL_TYPE+n+3				;
+			}
                 }
                 printf("%s", COLOR_BEGIN WHITE)                                                                 ;
                 for (k=1; k<=size; k++) {printf("%s", "-");}                                                    ;       # n = number of nodes
@@ -204,9 +236,20 @@ fi
                         if ($2 ~ ".lsnr"){sub(".lsnr$", "", $2); tab_lsnr[$2] = $2}                             ;       # Listeners
                         if ($2 ~ ".svc") {sub(".svc$", "", $2) ; tab_svc[$2] = $2;
                                           split($2, temp, ".");
+
+					  if (length(tab_svc_db[temp[1]]) > 0)
+					  {	tab_svc_db[temp[1]]=tab_svc_db[temp[1]] "," temp[2];
+					  } else 
+					  { 	tab_svc_db[temp[1]]=temp[2];
+					  }
+
                                           if (length(temp[2]) > max_length_svc)                                         # To adapt the column size
                                           {     max_length_svc = length(temp[2])                                ;
                                           }
+
+					  if (length(tab_svc_db[temp[1]]) > max_length_svcs)
+					  {	max_length_svcs = length(tab_svc_db[temp[1]])			;
+					  }
                                          }                                                                              # Services
                         DB=$2                                                                                   ;
                         if (length(DB)+2 > COL_DB)              # Adjust the size of the DB column in case of very long DB name
@@ -233,6 +276,13 @@ fi
                                                 if ($1 == "ROLE")                                                       # Primary / Standby expected here
                                                 {              role[DB] = $2                                    ;
                                                 }
+						if ($1 ~ /USR_ORA_INST_NAME@SERVERNAME/)
+						{ 	
+							if ($1 ~ HOST) {	
+								alias[$2] = OH					;	
+								alias2[DB]=$2					;
+							}
+						}
                                                 if ($0 ~ /^$/)
                                                 {           version[DB] = VERSION                               ;
                                                                  oh[DB] = OH                                    ;
@@ -244,6 +294,7 @@ fi
                                                         }
                                                         break                                                   ;
                                                 }
+	
                                         }
                                 }
                                 if (DB in tab_lsnr == 1)
@@ -325,7 +376,7 @@ fi
                                 printf("\n")                                                                    ;
                         }
 
-                        if (length(tab_svc) > 0)                # We print only if we have something to show
+                        if (length(SHOW_SVC) > 2 && length(tab_svc) > 0)                # We print only if we have something to show
                         {
                                 if (max_length_svc > COL_VER)
                                 {       COL_SVC = max_length_svc                                                ;
@@ -334,7 +385,7 @@ fi
                                 }
                                 # A header for the services
                                 printf("%s", center("DB"      ,  COL_DB, WHITE))                                ;
-                                printf("%s", center("Service" ,  COL_SVC, WHITE))                               ;
+                                printf("%s", center("Services" ,  COL_SVC, WHITE))                               ;
                                 n=asort(nodes)                                                                  ;       # sort array nodes
                                 for (i = 1; i <= n; i++) {
                                         printf("%s", center(nodes[i], COL_NODE, WHITE))                         ;
@@ -377,9 +428,17 @@ fi
 
                         if (length(version) > 0)                # We print only if we have something to show
                         {
+				if (max_length_svcs+2 > COL_VER)
+                                {       COL_SVC = max_length_svcs+2                                              ;
+                                } else {
+                                        COL_SVC = COL_VER                                                       ;
+                                }
                                 # A header for the databases
                                 printf("%s", center("DB"        , COL_DB, WHITE))                                ;
                                 printf("%s", center("Version"   , COL_VER, WHITE))                               ;
+				if (length(INT_DB_SVC) > 2) 
+				{ 	printf("%s", center("Services"   , COL_SVC, WHITE))                               ;
+				}
                                 n=asort(nodes)                                                                   ;       # sort array nodes
                                 for (i = 1; i <= n; i++) {
                                         printf("%s", center(nodes[i], COL_NODE, WHITE))                          ;
@@ -398,6 +457,14 @@ fi
                                         printf(COLOR_BEGIN WHITE " %-8s" COLOR_END, version[version_sorted[j]], COL_VER, WHITE)         ;       # Version
                                         printf(COLOR_BEGIN WHITE "%6s" COLOR_END"|"," ("oh_list[oh[version_sorted[j]]] ") ")            ;       # OH id
 
+					if (length(INT_DB_SVC) > 2)
+					{	if (length(tab_svc_db[version_sorted[j]]) > 0)                # We print only if we have something to show
+						{	printf("%s", center(tab_svc_db[version_sorted[j]], COL_SVC, WHITE));
+						} else {
+							printf("%s", center("", COL_SVC, WHITE));
+						}
+					}
+
                                         for (i = 1; i <= n; i++) {
                                                 dbstatus = status[version_sorted[j],nodes[i]]                    ;
 
@@ -409,6 +476,7 @@ fi
                                                 #
                                                 if (dbstatus == "")                     {printf("%s", center(UNKNOWN , COL_NODE, BLUE         ))      ;}      else
                                                 if (dbstatus == "Open")                 {printf("%s", center(dbstatus, COL_NODE, GREEN        ))      ;}      else
+                                                if (dbstatus == "Started" && dbtype[version_sorted[j]] == "ASM") {printf("%s", center(dbstatus, COL_NODE, GREEN        ))      ;}      else
                                                 if (dbstatus == "Open,Readonly")        {printf("%s", center(dbstatus, COL_NODE, WHITE        ))      ;}      else
                                                 if (dbstatus == "Readonly")             {printf("%s", center(dbstatus, COL_NODE, YELLOW       ))      ;}      else
                                                 if (dbstatus == "Instance Shutdown")    {printf("%s", center(dbstatus, COL_NODE, YELLOW       ))      ;}      else
@@ -445,16 +513,44 @@ fi
                                 {
                                         printf("\t\t%s\n", oh_list[x] " : " x) | "sort"                           ;
                                 }
+	
+				for (db in tab_svc_db)
+				{
+					split(tab_svc_db[db], services, ",");
+					for (svc in services)
+					{
+						alias2[services[svc]] = alias2[db];
+					}
+				}
+
+				for (id in alias)
+				{
+					printf("alias -- %s=\"export ORACLE_SID=%s;export ORACLE_HOME=%s;export PATH=$ORACLE_HOME/bin:$ORACLE_HOME/OPatch:$PATH;export SHLIB_PATH=$BASE_SHLIB_PATH:$ORACLE_HOME/bin:$ORACLE_HOME/lib;echo \\\"ORACLE_SID = %s\nORACLE_HOME = %s\\\"\"\n", id, id, alias[id], id, alias[id]) > FILENAME "a" ;
+				}
+
+                                for (id in alias2)
+                                {
+					printf("alias -- %s=%s\n",id, alias2[id]) > FILENAME "a"		;
+                                }
                         }
         }' $TMP
 
+	if [[ $SET_ALIAS = 'YES' ]]; then
+		source ${TMP}a						;
+	fi
         printf "\n"
 
 if [ -f ${TMP} ]
 then
-        rm -f ${TMP}
+	rm -f ${TMP}
+fi
+
+if [ -f ${TMP}a ]
+then
+	rm -f ${TMP}a
 fi
 
 #*********************************************************************************************************
 #                               E N D     O F      S O U R C E
 #*********************************************************************************************************
+
